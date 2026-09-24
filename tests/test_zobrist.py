@@ -1,7 +1,7 @@
 import pytest
 import chess
 
-from noodlesnake.controller import Controller
+from noodlesnake.controller import PositionController
 from noodlesnake.zobrist import Zobrist
 from random import choice
 
@@ -42,7 +42,7 @@ def castling_available():
 
 def test_zobrist_hash(en_passant_available, capture_available, promotion_available):
     for board in en_passant_available + capture_available + promotion_available:
-        controller = Controller(board)
+        controller = PositionController(board)
         zobrist = Zobrist()
 
         for _ in range(1000):

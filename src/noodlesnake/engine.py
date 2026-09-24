@@ -2,8 +2,8 @@ import chess
 import time
 
 from noodlesnake import helpers
-from noodlesnake.controller import Controller
-from noodlesnake.transposition import TranspositionTable, TranspositionTableEntry, EXACT, UPPER, LOWER
+from noodlesnake.controller import PositionController
+from noodlesnake.transposition import TranspositionTableEntry, EXACT, UPPER, LOWER
 
 
 class _SearchStopped(Exception):
@@ -13,11 +13,9 @@ class _SearchStopped(Exception):
 class NoodlesnakeEngine:
     __slots__ = ('controller', 'transposition', 'history', 'butterfly', 'killer', '_deadline', '_stop_event')
     def __init__(self):
-        # Controller to make and unmake moves while also updating the zobrist key
-        self.controller = Controller()
+        self.controller = PositionController()
 
-        # Transposition table
-        self.transposition = TranspositionTable()
+        self.transposition = {}
 
         # Relative history heuristic
         self.history = [[[0] * 64 for _ in range(64)] for _ in range(2)]
@@ -42,26 +40,33 @@ class NoodlesnakeEngine:
 
         for depth in range(1, depth_limit + 1):
             try:
-                _, completed_move = self._negamax(board, float('-inf'), float('inf'), depth, True)
+                _, completed_move = self._negamax(board, float('-inf'), float('inf'), depth, True, root=True)
             except _SearchStopped:
                 break
 
-            best_move = completed_move
-
+            if completed_move is not None:
+                best_move = completed_move
         return best_move
 
     def _quiescence(self, depth, board):
         if depth <= 0 or board.is_game_over():
             return
 
-    def _negamax(self, board, alpha, beta, depth, do_null):
+    def _negamax(self, board, alpha, beta, depth, do_null, root=False):
         if time.perf_counter() >= self._deadline or (self._stop_event is not None and self._stop_event.is_set()):
             raise _SearchStopped
 
         alpha_orig = alpha
 
-        # See if same position has been reached before in transposition table
-        entry = self.transposition.lookup(self.controller.zobrist.key)
+        outcome = board.outcome()
+        if outcome is not None:
+            score = 0 if outcome.winner is None else -100000 - depth
+            return score, None
+        can_claim_draw = board.is_fifty_moves() or board.is_repetition(3)
+        use_table = not (root and can_claim_draw)
+
+        position_key = self.controller.position_key
+        entry = self.transposition.get(position_key) if use_table else None
         if entry is not None and entry.depth >= depth:
             if entry.flag == EXACT:
                 return entry.score, entry.move
@@ -73,9 +78,9 @@ class NoodlesnakeEngine:
             if alpha >= beta:
                 return entry.score, entry.move
 
-        if depth <= 0 or board.is_game_over():
-            # return self.nn_evaluation(board) - depth, None
-            return self.static_evaluation(board) - depth, None
+        if depth <= 0:
+            score = self.static_evaluation(board) - depth
+            return max(0, score) if can_claim_draw and not root else score, None
 
         # Null move pruning
         if do_null and not board.is_check():
@@ -90,10 +95,12 @@ class NoodlesnakeEngine:
                 return score, None
 
         best_move = None
-        best_score = float('-inf')
+        best_score = 0 if can_claim_draw and not root else float('-inf')
+        alpha = max(alpha, best_score)
+        if alpha >= beta:
+            return best_score, None
 
         def move_score(move):
-            # Pv node
             if entry is not None and entry.flag == EXACT and entry.move == move:
                 return 10000
 
@@ -146,16 +153,14 @@ class NoodlesnakeEngine:
                 if not is_capture:
                     self.butterfly[board.turn][move.from_square][move.to_square] += depth
 
-        # Store result in transposition table
-        if best_score <= alpha_orig:
-            flag = UPPER
-        elif score >= beta:
-            flag = LOWER
-        else:
-            flag = EXACT
-
-        entry = TranspositionTableEntry(flag, depth, best_move, best_score)
-        self.transposition.store(self.controller.zobrist.key, entry)
+        if use_table:
+            if best_score <= alpha_orig:
+                flag = UPPER
+            elif score >= beta:
+                flag = LOWER
+            else:
+                flag = EXACT
+            self.transposition[position_key] = TranspositionTableEntry(flag, depth, best_move, best_score)
 
         return best_score, best_move
 
@@ -174,10 +179,8 @@ class NoodlesnakeEngine:
         black_score = 0
         
         for piece in chess.PIECE_TYPES:
-            for _ in board.pieces(piece, chess.WHITE):
-                white_score += piece_scores[piece-1]
-            for _ in board.pieces(piece, chess.BLACK):
-                black_score += piece_scores[piece-1]
+            white_score += board.pieces_mask(piece, chess.WHITE).bit_count() * piece_scores[piece-1]
+            black_score += board.pieces_mask(piece, chess.BLACK).bit_count() * piece_scores[piece-1]
                 
         if board.turn == chess.WHITE:
             return white_score - black_score
