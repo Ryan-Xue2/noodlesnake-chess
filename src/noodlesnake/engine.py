@@ -83,7 +83,7 @@ class NoodlesnakeEngine:
             return max(0, score) if can_claim_draw and not root else score, None
 
         # Null move pruning
-        if do_null and not board.is_check():
+        if do_null and beta < float('inf') and not board.is_check():
             self.controller.make_null_move()
             try:
                 R = 2
